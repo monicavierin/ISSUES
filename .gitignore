@@ -1,0 +1,17 @@
+# All resources (datasets & pretrained files)
+resources/
+
+# Model checkpoints
+checkpoints/
+
+# Python cache
+src/__pycache__/
+*.pyc
+
+# Wandb
+wandb/
+
+# Others
+.cursor
+.venv
+.idea
