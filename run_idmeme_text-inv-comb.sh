@@ -1,19 +1,19 @@
 python src/main.py \
-    --dataset 'harmeme'\
+    --dataset 'idmeme'\
     --num_mapping_layers 1 \
     --map_dim 768 \
     --fusion align \
     --num_pre_output_layers 3 \
     --drop_probs 0.2 0.4 0.1 \
     --gpus '0' \
-    --batch_size 64 \
+    --batch_size 16 \
     --lr 0.000013 \
-    --max_epochs 60 \
+    --max_epochs 20 \
     --name 'text-inv-comb' \
-    --pretrained_model 'harmeme_text-inv-comb_best.ckpt' \
-    --reproduce t \
-    --pretrained_proj_weights t \
-    --freeze_proj_layers t \
+    --pretrained_model '' \
+    --reproduce f \
+    --pretrained_proj_weights f \
+    --freeze_proj_layers f \
     --comb_proj t \
     --comb_fusion align \
     --convex_tensor f \
@@ -21,5 +21,5 @@ python src/main.py \
     --text_inv_proj t \
     --post_inv_proj t \
     --enh_text t \
-    --phi_freeze t \
-    --fast_process t
+    --phi_freeze f \
+    --fast_process f
