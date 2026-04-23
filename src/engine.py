@@ -3,13 +3,11 @@ import torch
 import torch.nn as nn
 import torchmetrics
 import clip
-
+import wandb
 from combiner import Combiner
 from textualInversion import TextualInversion
 
-
 CLIP_IMG_ENC_OUTPUT_DIM_BEFORE_PROJ = 1024
-
 
 class LinearProjection(nn.Module):
     def __init__(self, input_dim, output_dim, num_layers, drop_probs):
@@ -120,6 +118,9 @@ class HateClassifier(pl.LightningModule):
                 elif self.dataset == 'harmeme':
                     assert self.map_dim == 768
                     weights = f'harmeme_{self.map_dim}_projection_embeddings.pt'
+                elif self.dataset == 'idmeme':
+                    assert  self.map_dim == 768
+                    weights = f'idmeme_{self.map_dim}_projection_embeddings.pt'
                 else:
                     raise ValueError()
 
@@ -187,6 +188,11 @@ class HateClassifier(pl.LightningModule):
                     weights_768 = f'harmeme_{self.map_dim}_projection_embeddings.pt'
                     weights = weights_768
 
+                elif self.dataset == 'idmeme':
+                    assert self.map_dim == 768
+                    weights_768 = f'idmeme_{self.map_dim}_projection_embeddings.pt'
+                    weights = weights_768
+
                 else:
                     raise ValueError()
 
@@ -224,6 +230,7 @@ class HateClassifier(pl.LightningModule):
         self.output = nn.Linear(output_input_dim, 1)
 
         self.cross_entropy_loss = torch.nn.BCEWithLogitsLoss(reduction='mean')
+        self.test_outputs = []
 
     def forward(self, batch):
         pass
@@ -251,6 +258,8 @@ class HateClassifier(pl.LightningModule):
             image_features, text_features = self.compute_CLIP_features_without_proj(self.clip_model,
                                                                                     batch['pixel_values'],
                                                                                     batch['texts'])
+
+        # [STAGE] Engine: setelah CLIP image/text encoder (output A / fitur teks)
         if self.enh_text:
             prompt = batch['enhanced_texts']
         else:
@@ -316,13 +325,16 @@ class HateClassifier(pl.LightningModule):
         elif self.name == 'text-inv-comb':
             txt_features = self.text_inv(prompt, image_features)
 
+            # [STAGE] Engine: setelah Linear image projection (ke Combiner)
             img_projection = self.image_map(image_features)
 
+            # [STAGE] Engine: setelah Combiner (fitur gabungan)
             features = self.comb(img_projection, txt_features)
 
         else:
             raise ValueError()
 
+        # [STAGE] Engine: setelah MLP pre_output + kepala klasifikasi
         features_pre_output = self.pre_output(features)
         logits = self.output(features_pre_output).squeeze(dim=1)  # [batch_size, 1]
         preds_proxy = torch.sigmoid(logits)
@@ -332,6 +344,8 @@ class HateClassifier(pl.LightningModule):
         output['loss'] = self.cross_entropy_loss(logits, batch['labels'].float())
         output['accuracy'] = self.acc(preds, batch['labels'])
         output['auroc'] = self.auroc(preds_proxy, batch['labels'])
+        output["logits"] = logits
+        output["probs"] = preds_proxy.detach()
 
         return output
 
@@ -367,7 +381,7 @@ class HateClassifier(pl.LightningModule):
                 2: 'dev_unseen',
                 3: 'test_unseen'
             }
-        elif self.dataset == 'harmeme':
+        elif self.dataset in ['harmeme', 'idmeme']:
             prefix_map = {
                 0: 'val',
                 1: 'test',
@@ -376,8 +390,20 @@ class HateClassifier(pl.LightningModule):
             raise ValueError()
 
         prefix = prefix_map[dataloader_idx]
-
         output = self.common_step(batch)
+
+        # Save prediction table to wandb
+        if dataloader_idx == len(prefix_map) - 1:
+            probs = output['logits']
+            preds = (probs > 0.5).long()
+
+            for i, name in enumerate(batch["image_names"]):
+                self.test_outputs.append({
+                    "image_name": name,
+                    "ground_truth": int(batch["labels"][i]),
+                    "prediction": int(preds[i]),
+                    "probability": float(probs[i])
+            })
 
         self.log(f'{prefix}/accuracy', output['accuracy'])
         self.log(f'{prefix}/auroc', output['auroc'])
@@ -392,9 +418,9 @@ class HateClassifier(pl.LightningModule):
         self.acc.reset()
         self.auroc.reset()
 
-    def test_epoch_end(self, outputs):
-        self.acc.reset()
-        self.auroc.reset()
+    # def test_epoch_end(self, outputs):
+        # self.acc.reset()
+        # self.auroc.reset()
 
     def configure_optimizers(self):
         param_dicts = [
@@ -403,7 +429,20 @@ class HateClassifier(pl.LightningModule):
         optimizer = torch.optim.AdamW(param_dicts, lr=self.lr, weight_decay=self.weight_decay)
 
         return optimizer
+    
+    def on_test_epoch_end(self):
+        table = wandb.Table(columns=["image_name", "ground_truth", "prediction", "probability"])
 
+        for row in self.test_outputs[:50]:
+            table.add_data(
+                row["image_name"],
+                row["ground_truth"],
+                row["prediction"],
+                row["probability"]
+            )
+
+        wandb.log({"test_predictions": table})
+        self.test_outputs.clear()
 
 def create_model(args):
     model = HateClassifier(args=args)

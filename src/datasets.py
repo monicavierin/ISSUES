@@ -2,12 +2,10 @@ import os
 import pandas as pd
 import torch
 import clip
-
 from PIL import Image
 from torch.utils.data import Dataset
 
 os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
-
 
 class MemesDataset(Dataset):
     def __init__(self, root_folder, dataset, split='train', image_size=224, fast=True):
@@ -60,7 +58,13 @@ class MemesDataset(Dataset):
                 .resize((self.image_size, self.image_size))
             text = txt
 
+        if self.dataset == 'hmc':
+            image_name = row['img'].split('/')[1]
+        else:
+            image_name = row['image']
+
         item = {
+            'image_name': image_name,
             'image': image,
             'text': text,
             'label': row['label'],
@@ -69,7 +73,6 @@ class MemesDataset(Dataset):
         }
 
         return item
-
 
 class MemesCollator(object):
     def __init__(self, args):
@@ -90,7 +93,11 @@ class MemesCollator(object):
 
         simple_prompt = clip.tokenize('a photo of $', context_length=77).repeat(labels.shape[0], 1)
 
-        batch_new = {'labels': labels,
+        image_names = [item['image_name'] for item in batch]
+
+        batch_new = {
+                     'image_names': image_names,
+                     'labels': labels,
                      'idx_memes': idx_memes,
                      'enhanced_texts': enh_texts,
                      'simple_prompt': simple_prompt

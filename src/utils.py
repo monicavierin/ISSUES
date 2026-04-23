@@ -1,6 +1,5 @@
 import argparse
 
-
 def str2bool(v):
     """
     src: https://stackoverflow.com/questions/15008758/parsing-boolean-values-with-argparse

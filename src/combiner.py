@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 
-
 class Combiner(nn.Module):
     def __init__(self, convex_tensor: bool, input_dim: int, comb_proj: bool, comb_fusion: str):
         super(Combiner, self).__init__()

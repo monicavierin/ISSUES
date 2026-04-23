@@ -1,21 +1,21 @@
 import argparse
 import random
 import torch
-
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 from torch.utils.data import DataLoader
-
 from datasets import MemesCollator, load_dataset
 from engine import create_model, HateClassifier
 from utils import str2bool, generate_name
 
+# Activate tensor cores
+torch.set_float32_matmul_precision('medium')
 
 def get_arg_parser():
     parser = argparse.ArgumentParser(description='Training and evaluation script for hateful memes classification')
 
-    parser.add_argument('--dataset', default='hmc', choices=['hmc', 'harmeme'])
+    parser.add_argument('--dataset', default='hmc', choices=['hmc', 'harmeme', 'idmeme'])
     parser.add_argument('--image_size', type=int, default=224)
 
     parser.add_argument('--num_mapping_layers', default=1, type=int)
@@ -84,7 +84,7 @@ def main(args):
         dataset_val_unseen = load_dataset(args=args, split='dev_unseen')
         dataset_test_unseen = load_dataset(args=args, split='test_unseen')
 
-    elif args.dataset == 'harmeme':
+    elif args.dataset in ['harmeme', 'idmeme']:
         dataset_train = load_dataset(args=args, split='train')
         dataset_val = load_dataset(args=args, split='val')
         dataset_test = load_dataset(args=args, split='test')
@@ -100,7 +100,8 @@ def main(args):
         print("Number of test examples (unseen):", len(dataset_test_unseen))
 
     # data loader
-    num_cpus = 0 if args.fast_process else min(args.batch_size, 24)
+    # num_cpus = 0 if args.fast_process else min(args.batch_size, 24)
+    num_cpus = 0 if args.fast_process else 4
 
     collator = MemesCollator(args)
 
@@ -151,7 +152,7 @@ def main(args):
                       gradient_clip_val=args.gradient_clip_val, logger=wandb_logger,
                       log_every_n_steps=args.log_every_n_steps, val_check_interval=args.val_check_interval,
                       callbacks=[checkpoint_callback], limit_train_batches=args.limit_train_batches,
-                      limit_val_batches=args.limit_val_batches, deterministic=True)
+                      limit_val_batches=args.limit_val_batches, deterministic=False, precision="16")
 
     if not args.reproduce:
         trainer.fit(model, train_dataloaders=dataloader_train, val_dataloaders=dataloader_val)
@@ -160,7 +161,7 @@ def main(args):
             trainer.test(ckpt_path='best',
                          dataloaders=[dataloader_val, dataloader_test, dataloader_val_unseen, dataloader_test_unseen]
                          )
-        elif args.dataset == 'harmeme':
+        elif args.dataset in ['harmeme', 'idmeme']:
             trainer.test(ckpt_path='best',
                          dataloaders=[dataloader_val, dataloader_test]
                          )
@@ -171,13 +172,12 @@ def main(args):
             trainer.test(model,
                          dataloaders=[dataloader_val, dataloader_test, dataloader_val_unseen, dataloader_test_unseen]
                          )
-        elif args.dataset == 'harmeme':
+        elif args.dataset in ['harmeme', 'idmeme']:
             trainer.test(model,
-                         dataloaders=[dataloader_val, dataloader_test]
-                         )
+                dataloaders=[dataloader_val, dataloader_test]
+            )
         else:
             raise ValueError()
-
 
 if __name__ == '__main__':
     pars = get_arg_parser()

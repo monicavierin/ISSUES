@@ -4,7 +4,6 @@ from clip.model import CLIP
 
 PHI_INPUT_DIM = 768
 
-
 class TextualInversion(nn.Module):
     def __init__(self, clip_model: CLIP, clip_img_enc_output_dim: int, phi_proj: bool, text_proj: bool, post_proj: bool,
                  drop_probs, phi_freeze: bool, enh_text: bool, post_dim=None, num_pre_proj_layers=1):
@@ -104,9 +103,11 @@ class TextualInversion(nn.Module):
         return super().__call__(*args, **kwargs)
 
     def forward(self, prompt, image_features):
+        # [STAGE] TextualInversion: setelah pre_inversion_map (gambar -> 768d)
         img_features = self.pre_inversion_map(image_features)
         # img_features = F.normalize(img_features, p=2, dim=1)
 
+        # [STAGE] TextualInversion: setelah phi (v_star)
         v_star = self.phi(img_features)
 
         if self.phi_proj:
@@ -115,6 +116,7 @@ class TextualInversion(nn.Module):
 
         text_input = prompt
 
+        # [STAGE] TextualInversion: setelah CLIP text encoder + v_star (embedding teks)
         features = self.encode_with_vstar(self.clip_model, text_input, v_star, proj=self.text_proj).float()
         # features = F.normalize(features, p=2, dim=1)
 
