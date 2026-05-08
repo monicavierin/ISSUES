@@ -59,7 +59,7 @@ def get_arg_parser():
 
     parser.add_argument('--phi_freeze', default=False, type=str2bool)
 
-    parser.add_argument('--name', type=str, default='adaptation',
+    parser.add_argument('--name', default='adaptation', type=str,
                         choices=['adaptation', 'hate-clipper', 'image-only', 'text-only', 'sum', 'combiner', 'text-inv',
                                  'text-inv-fusion', 'text-inv-comb']
                         )
@@ -67,6 +67,11 @@ def get_arg_parser():
     parser.add_argument('--reproduce', default=False, type=str2bool)
     parser.add_argument('--print_model', default=False, type=str2bool)
     parser.add_argument('--fast_process', default=False, type=str2bool)
+
+    parser.add_argument('--use_smote', default=False, action='store_true', help='Apply SMOTE to balance training data')
+    parser.add_argument('--smote_strategy', default='auto', type=str,
+                        choices=['auto', 'adasyn', 'minority', 'all'],
+                        help='SMOTE resampling strategy')
 
     return parser
 

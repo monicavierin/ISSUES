@@ -8,7 +8,7 @@ python src/main.py \
     --gpus '0' \
     --batch_size 16 \
     --lr 0.000013 \
-    --max_epochs 20 \
+    --max_epochs 10 \
     --name 'text-inv-comb' \
     --pretrained_model '' \
     --reproduce f \
@@ -22,4 +22,6 @@ python src/main.py \
     --post_inv_proj t \
     --enh_text t \
     --phi_freeze f \
-    --fast_process f
+    --fast_process f\
+    --use_smote \
+    --smote_strategy 'auto'

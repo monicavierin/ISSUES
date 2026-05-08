@@ -4,6 +4,8 @@ import torch.nn as nn
 import torchmetrics
 import clip
 import wandb
+import matplotlib.pyplot as plt
+import seaborn as sns
 from combiner import Combiner
 from textualInversion import TextualInversion
 
@@ -62,7 +64,11 @@ class HateClassifier(pl.LightningModule):
         self.phi_inv_proj = args.phi_inv_proj
         self.post_inv_proj = args.post_inv_proj
 
+        self.confmat = torchmetrics.ConfusionMatrix(task='binary', num_classes=2)
         self.acc = torchmetrics.Accuracy(task='binary')
+        self.precmet = torchmetrics.Precision(task='binary')
+        self.recall = torchmetrics.Recall(task='binary')    
+        self.f1 = torchmetrics.F1Score(task='binary')
         self.auroc = torchmetrics.AUROC(task='binary')
 
         self.pretrained_weights_path = f'./resources/pretrained_weights/{self.dataset}'
@@ -342,10 +348,14 @@ class HateClassifier(pl.LightningModule):
         preds = (preds_proxy >= 0.5).long()
 
         output['loss'] = self.cross_entropy_loss(logits, batch['labels'].float())
+        output['confmat'] = self.confmat(preds, batch['labels'])
         output['accuracy'] = self.acc(preds, batch['labels'])
+        output['precision'] = self.precmet(preds, batch['labels'])
+        output['recall'] = self.recall(preds, batch['labels'])
+        output['f1'] = self.f1(preds, batch['labels'])
         output['auroc'] = self.auroc(preds_proxy, batch['labels'])
-        output["logits"] = logits
-        output["probs"] = preds_proxy.detach()
+        output['logits'] = logits
+        output['probs'] = preds_proxy.detach()
 
         return output
 
@@ -357,6 +367,9 @@ class HateClassifier(pl.LightningModule):
         self.log('train/total_loss', total_loss)
         self.log('train/loss', output['loss'])
         self.log('train/accuracy', output['accuracy'])
+        self.log('train/precision', output['precision'])
+        self.log('train/recall', output['recall'])
+        self.log('train/f1', output['f1'])
         self.log('train/auroc', output['auroc'])
 
         return total_loss
@@ -369,6 +382,9 @@ class HateClassifier(pl.LightningModule):
         self.log(f'val/total_loss', total_loss)
         self.log(f'val/loss', output['loss'])
         self.log(f'val/accuracy', output['accuracy'])
+        self.log(f'val/precision', output['precision'])
+        self.log(f'val/recall', output['recall'])
+        self.log(f'val/f1', output['f1'])
         self.log(f'val/auroc', output['auroc'])
 
         return total_loss
@@ -406,6 +422,9 @@ class HateClassifier(pl.LightningModule):
             })
 
         self.log(f'{prefix}/accuracy', output['accuracy'])
+        self.log(f'{prefix}/precision', output['precision'])
+        self.log(f'{prefix}/recall', output['recall'])
+        self.log(f'{prefix}/f1', output['f1'])
         self.log(f'{prefix}/auroc', output['auroc'])
 
         return output
@@ -431,6 +450,45 @@ class HateClassifier(pl.LightningModule):
         return optimizer
     
     def on_test_epoch_end(self):
+        if len(self.test_outputs) == 0:
+            return
+        
+        y_true = [row["ground_truth"] for row in self.test_outputs]
+        y_pred = [row["prediction"] for row in self.test_outputs]
+        y_prob = [row["probability"] for row in self.test_outputs]
+        class_names = ["non-hate", "hate"]
+        
+        # Confusion matrix table for test set
+        wandb.log({
+            "test/confmat_table": wandb.plot.confusion_matrix(
+                probs=None,
+                y_true=y_true,
+                preds=y_pred,
+                class_names=class_names
+            )
+        })
+
+        # Confusion matrix heatmap for test set      
+        cm = self.confmat.compute().cpu().numpy()
+        fig, ax = plt.subplots(figsize=(4, 4))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                    xticklabels=class_names, yticklabels=class_names, ax=ax)
+        ax.set_xlabel('Predicted')
+        ax.set_ylabel('True')
+        ax.set_title('Confusion Matrix Heatmap')
+        wandb.log({"test/confmat_heatmap": wandb.Image(fig)})
+        plt.close(fig)  
+
+        # ROC curve for test set
+        wandb.log({
+            "test_roc_curve": wandb.plot.roc_curve(
+                y_true=y_true, 
+                y_prob=y_prob, 
+                labels=class_names
+            )
+        })
+
+        # Prediction table for test set
         table = wandb.Table(columns=["image_name", "ground_truth", "prediction", "probability"])
 
         for row in self.test_outputs[:50]:
@@ -442,6 +500,9 @@ class HateClassifier(pl.LightningModule):
             )
 
         wandb.log({"test_predictions": table})
+
+        self.confmat.reset()
+        self.auroc.reset()
         self.test_outputs.clear()
 
 def create_model(args):
