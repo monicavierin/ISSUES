@@ -410,7 +410,7 @@ class HateClassifier(pl.LightningModule):
 
         # Save prediction table to wandb
         if dataloader_idx == len(prefix_map) - 1:
-            probs = output['logits']
+            probs = torch.sigmoid(output['logits'])
             preds = (probs > 0.5).long()
 
             for i, name in enumerate(batch["image_names"]):
@@ -450,23 +450,15 @@ class HateClassifier(pl.LightningModule):
         return optimizer
     
     def on_test_epoch_end(self):
-        if len(self.test_outputs) == 0:
+        if not self.test_outputs:
             return
         
+        # Value for confusion matrix and ROC curve
         y_true = [row["ground_truth"] for row in self.test_outputs]
         y_pred = [row["prediction"] for row in self.test_outputs]
         y_prob = [row["probability"] for row in self.test_outputs]
+        y_prob_2d = [[1 - prob, prob] for prob in y_prob]  # Convert to 2D array for AUROC plot
         class_names = ["non-hate", "hate"]
-        
-        # Confusion matrix table for test set
-        wandb.log({
-            "test/confmat_table": wandb.plot.confusion_matrix(
-                probs=None,
-                y_true=y_true,
-                preds=y_pred,
-                class_names=class_names
-            )
-        })
 
         # Confusion matrix heatmap for test set      
         cm = self.confmat.compute().cpu().numpy()
@@ -476,31 +468,71 @@ class HateClassifier(pl.LightningModule):
         ax.set_xlabel('Predicted')
         ax.set_ylabel('True')
         ax.set_title('Confusion Matrix Heatmap')
-        wandb.log({"test/confmat_heatmap": wandb.Image(fig)})
+        wandb.log({"test_confmat_heatmap": wandb.Image(fig)})
         plt.close(fig)  
 
         # ROC curve for test set
         wandb.log({
             "test_roc_curve": wandb.plot.roc_curve(
                 y_true=y_true, 
-                y_prob=y_prob, 
+                y_probas=y_prob_2d,
                 labels=class_names
             )
         })
 
+        # Log evaluation metrics in a W&B table
+        m = wandb.run.summary
+
+        def get_val(key):
+            val = m.get(key) or self.trainer.callback_metrics.get(key)
+            if val is not None:
+                try: 
+                    return f"{float(val):.4f}"
+                except (ValueError, TypeError):
+                    return str(val)
+            return "-"
+        
+        metrics_table = wandb.Table(columns=[
+            "split", "accuracy", "precision", "recall", "f1-score", "auroc", "loss", "total_loss"
+        ])
+
+        # Add data rows for train, validation, and test splits
+        metrics_table.add_data(
+            "train",
+            get_val('train/accuracy'), get_val('train/precision'), get_val('train/recall'),
+            get_val('train/f1'), get_val('train/auroc'), get_val('train/loss'), get_val('train/total_loss')
+        )
+
+        metrics_table.add_data(
+            "validation",
+            get_val('val/accuracy/dataloader_idx_0'), get_val('val/precision/dataloader_idx_0'),
+            get_val('val/recall/dataloader_idx_0'), get_val('val/f1/dataloader_idx_0'),
+            get_val('val/auroc/dataloader_idx_0'), get_val('val/loss'), get_val('val/total_loss')
+        )
+
+        metrics_table.add_data(
+            "test",
+            get_val('test/accuracy/dataloader_idx_1'), get_val('test/precision/dataloader_idx_1'),
+            get_val('test/recall/dataloader_idx_1'), get_val('test/f1/dataloader_idx_1'),
+            get_val('test/auroc/dataloader_idx_1'), "-", "-"
+        )   
+
+        wandb.log({"evaluation_metrics": metrics_table})
+
         # Prediction table for test set
-        table = wandb.Table(columns=["image_name", "ground_truth", "prediction", "probability"])
+        pred_table = wandb.Table(columns=["image_name", "ground_truth", "prediction", "probability"])
 
         for row in self.test_outputs[:50]:
-            table.add_data(
+            pred_table.add_data(
                 row["image_name"],
                 row["ground_truth"],
                 row["prediction"],
                 row["probability"]
             )
 
-        wandb.log({"test_predictions": table})
+        wandb.log({"test_predictions": pred_table})
 
+        # Reset metrics and test outputs for next test run
         self.confmat.reset()
         self.auroc.reset()
         self.test_outputs.clear()

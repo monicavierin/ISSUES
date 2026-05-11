@@ -8,7 +8,7 @@ python src/main.py \
     --gpus '0' \
     --batch_size 16 \
     --lr 0.000013 \
-    --max_epochs 10 \
+    --max_epochs 2 \
     --name 'text-inv-comb' \
     --pretrained_model '' \
     --reproduce f \
