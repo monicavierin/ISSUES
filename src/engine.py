@@ -235,7 +235,13 @@ class HateClassifier(pl.LightningModule):
         self.pre_output = nn.Sequential(*pre_output_layers)
         self.output = nn.Linear(output_input_dim, 1)
 
-        self.cross_entropy_loss = torch.nn.BCEWithLogitsLoss(reduction='mean')
+        # Add weight loss to give FP penalty
+        if args.pos_weight and args.pos_weight != 1.0:
+            pos_weight = torch.tensor([args.pos_weight])
+            self.cross_entropy_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction='mean')
+        else:
+            self.cross_entropy_loss = torch.nn.BCEWithLogitsLoss(reduction='mean')
+
         self.test_outputs = []
 
     def forward(self, batch):
@@ -345,7 +351,7 @@ class HateClassifier(pl.LightningModule):
         logits = self.output(features_pre_output).squeeze(dim=1)  # [batch_size, 1]
         preds_proxy = torch.sigmoid(logits)
 
-        preds = (preds_proxy >= 0.5).long()
+        preds = (preds_proxy >= 0.5).long() # Threshold value changes to increase precision
 
         output['loss'] = self.cross_entropy_loss(logits, batch['labels'].float())
         output['confmat'] = self.confmat(preds, batch['labels'])

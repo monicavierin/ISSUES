@@ -68,6 +68,8 @@ def get_arg_parser():
     parser.add_argument('--print_model', default=False, type=str2bool)
     parser.add_argument('--fast_process', default=False, type=str2bool)
 
+    parser.add_argument('--pos_weight', type=float, default=1.0, help="Rasio n_negative/n_positive")
+
     parser.add_argument('--use_smote', default=False, action='store_true', help='Apply SMOTE to balance training data')
     parser.add_argument('--smote_strategy', default='auto', type=str,
                         choices=['auto', 'adasyn', 'minority', 'all'],

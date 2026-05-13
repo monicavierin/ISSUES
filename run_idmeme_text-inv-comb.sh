@@ -22,6 +22,7 @@ python src/main.py \
     --post_inv_proj t \
     --enh_text t \
     --phi_freeze f \
-    --fast_process f\
+    --fast_process f \
+    --pos_weight 1.2 \
     --use_smote \
     --smote_strategy 'auto'
