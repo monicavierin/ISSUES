@@ -31,95 +31,141 @@ class MemesDataset(Dataset):
         float_cols = self.df.select_dtypes(float).columns
         self.df[float_cols] = self.df[float_cols].fillna(-1).astype('Int64')
 
-        # Apply SMOTE before CLIP encoding to balance dataset
-        if self.use_smote and self.split == 'train':
-            self._apply_smote()
-
         if self.fast:
+            # Load embeddings first — SMOTE needs them as features
             self.embds = torch.load(f'{self.root_folder}/{self.dataset}/clip_embds/{split}_no-proj_output.pt')
             self.embdsDF = pd.DataFrame(self.embds)
 
-            assert len(self.embds) == len(self.df)
+            assert len(self.embds) == len(self.df), (
+                f"Embeddings ({len(self.embds)}) and dataframe ({len(self.df)}) size mismatch"
+            )
 
-    def _apply_smote(self):
-        print(f"Applying SMOTE on '{self.split}' split...")
-        
-        # Use text length and other characteristics as features for SMOTE
-        texts = self.df['text'].fillna('nothing').values
-        text_lengths = np.array([len(str(t)) for t in texts]).reshape(-1, 1)
-        
-        # Text length used as proxy feature
-        features = text_lengths
-        
+            # Apply SMOTE in CLIP embedding space (only on training split)
+            if self.use_smote and self.split == 'train':
+                self._apply_smote_on_embeddings()
+
+    def _apply_smote_on_embeddings(self):
+        print(f"Applying SMOTE on CLIP embeddings for '{self.split}' split...")
+
         labels = self.df['label'].values
-        
-        # Count class distribution
         unique, counts = np.unique(labels, return_counts=True)
         print(f"Original class distribution: {dict(zip(unique, counts))}")
-        
-        # Apply SMOTE
-        if self.smote_strategy == 'auto':
-            smote = SMOTE(random_state=42, k_neighbors=min(5, min(counts)-1))
-        elif self.smote_strategy == 'adasyn':
-            # Use ADADSYN if want adaptive synthethic sample generation 
-            smote = ADASYN(random_state=42, n_neighbors=min(5, min(counts)-1))
-        else:
-            smote = SMOTE(random_state=42, sampling_strategy=self.smote_strategy,
-                         k_neighbors=min(5, min(counts)-1))
-        
+
+        # 1. Use CLIP embeddings as features for SMOTE (1536-dim)
+        # Each sample's feature vector is the concatenation of its image and text embeddings.
+        n_samples = len(self.df)
+        image_embs = []
+        text_embs  = []
+
+        for i in range(n_samples):
+            row     = self.df.iloc[i]
+            # Search for the embedding corresponding to the current row's idx_meme
+            matches = self.embdsDF.loc[self.embdsDF['idx_meme'] == row['id']]
+            idx     = matches.index[0] if len(matches) > 0 else 0
+            embd    = self.embds[idx]
+            image_embs.append(embd['image'].squeeze(0).float().numpy())
+            text_embs.append(embd['text'].squeeze(0).float().numpy())
+
+        image_matrix = np.stack(image_embs)   # (N, 768)
+        text_matrix  = np.stack(text_embs)    # (N, 768)
+        feature_matrix = np.concatenate([image_matrix, text_matrix], axis=1)  # (N, 1536)
+
+        # 2. Run SMOTE
+        k = min(5, int(min(counts)) - 1)
+        if k < 1:
+            print("SMOTE skipped: not enough minority samples (need at least 2).")
+            return
+
         try:
-            features_resampled, labels_resampled = smote.fit_resample(features, labels)
+            if self.smote_strategy == 'adasyn':
+                sampler = ADASYN(random_state=42, n_neighbors=k)
+            elif self.smote_strategy == 'auto':
+                sampler = SMOTE(random_state=42, k_neighbors=k)
+            else:
+                sampler = SMOTE(random_state=42, sampling_strategy=self.smote_strategy,
+                                k_neighbors=k)
+
+            features_resampled, labels_resampled = sampler.fit_resample(feature_matrix, labels)
         except Exception as e:
             print(f"SMOTE failed: {e}. Using original data.")
             return
-        
-        # Count total synthetic samples generated
-        n_synthetic = len(labels_resampled) - len(labels)
+
+        n_synthetic = len(labels_resampled) - n_samples
         print(f"SMOTE generated {n_synthetic} synthetic samples")
         print(f"New class distribution: {dict(zip(*np.unique(labels_resampled, return_counts=True)))}")
-        
-        # Identify original and synthetic samples indices
-        original_indices = np.arange(len(labels))
-        synthetic_indices = np.arange(len(labels), len(labels_resampled))
-        
-        # For synthetic samples, the original data need to be duplicate with slight variations
-        if n_synthetic > 0:
-            # Take original data to be duplicated
-            original_df = self.df.copy()
-            
-            # For each synthetic sample, choose an original sample randomly and add noise
-            synthetic_rows = []
-            for idx in synthetic_indices:
-                # Choose original sample randomly from minority class 
-                original_idx = np.random.choice(original_indices[labels == labels_resampled[idx]])
-                original_row = original_df.iloc[original_idx].copy()
-                
-                # Add variance to text for noise
-                synthetic_rows.append(original_row)
-            
-            # Merge the original DataFrame with synthetic rows
-            synthetic_df = pd.DataFrame(synthetic_rows)
-            self.df = pd.concat([self.df, synthetic_df], ignore_index=True)
-            
-            print(f"Dataset size after SMOTE: {len(self.df)}")
+
+        if n_synthetic == 0:
+            return
+
+        # 3. Split the resampled features back into image and text embeddings, then append to dataset
+        synth_features = features_resampled[n_samples:]          # (n_synthetic, 1536)
+        synth_img_embs = synth_features[:, :768]                 # (n_synthetic, 768)
+        synth_txt_embs = synth_features[:, 768:]                 # (n_synthetic, 768)
+        synth_labels   = labels_resampled[n_samples:]
+
+        # 4. Add synthetic entries to self.embds and self.df
+        # Find donor rows (original samples from the same class) for metadata
+        original_indices = np.arange(n_samples)
+        synthetic_embd_entries = []
+        synthetic_df_rows      = []
+
+        for i in range(n_synthetic):
+            lbl = synth_labels[i]
+
+            # Choose a random donor from the original samples of the same class to copy metadata
+            donor_idx = int(np.random.choice(original_indices[labels == lbl]))
+            donor_row = self.df.iloc[donor_idx].copy()
+
+            # Negative ID for synthetic samples to avoid clashes with original IDs
+            synthetic_id = -(i + 1)
+            donor_row['id'] = synthetic_id
+
+            # Make new embedding entry with tensors of the SMOTE-interpolated embeddings
+            synthetic_embd_entries.append({
+                'idx_meme': synthetic_id,
+                'image': torch.tensor(synth_img_embs[i], dtype=torch.float32).unsqueeze(0),
+                'text':  torch.tensor(synth_txt_embs[i], dtype=torch.float32).unsqueeze(0),
+            })
+            synthetic_df_rows.append(donor_row)
+
+        # Add to main dataset
+        self.embds   = self.embds + synthetic_embd_entries
+        synthetic_df = pd.DataFrame(synthetic_df_rows)
+        self.df      = pd.concat([self.df, synthetic_df], ignore_index=True)
+
+        # Rebuild embdsDF so that lookups in __getitem__ remain true
+        self.embdsDF = pd.DataFrame(self.embds)
+
+        print(f"Dataset size after SMOTE: {len(self.df)}")
+        assert len(self.embds) == len(self.df), "Post-SMOTE size mismatch between embds and df!"
+
 
     def __len__(self):
         return len(self.df)
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
+        label = row['label']
 
-        if row['text'] == 'nothing':
-            txt = 'null'
+        if row['id'] >= 0:  # Original data have positive ID
+            if self.dataset == 'hmc':
+                image_name = row['img'].split('/')[1]
+            else:
+                image_name = row['image']
         else:
-            txt = row['text']
+            # Synthetics data SMOTE have negative ID
+            image_name = f"smote_synthetic_{abs(row['id'])}"
+
+        txt = 'null' if row['text'] == 'nothing' else row['text']
 
         if self.fast:
-            embd_idx = self.embdsDF.loc[self.embdsDF['idx_meme'] == row['id']].index
-            if len(embd_idx) == 0:
-                embd_idx = [0]  # Fallback to first embedding if not found
-            embd_idx = embd_idx[0]
-            embd_row = self.embds[embd_idx]
+            matches = self.embdsDF.loc[self.embdsDF['idx_meme'] == row['id']].index
+            if len(matches) == 0:
+                # Fallback make sure models don't break if idx_meme not found in embdsDF
+                embd_row = self.embds[0]
+                print(f"Warning: idx_meme {row['id']} not found in embdsDF, using index 0")
+            else:
+                embd_row = self.embds[matches[0]]
 
             # use CLIP pre-calculated embeddings as image and text inputs
             image = embd_row['image']
@@ -134,11 +180,6 @@ class MemesDataset(Dataset):
             image = Image.open(f"{self.root_folder}/{self.dataset}/img/{image_fn}").convert('RGB')\
                 .resize((self.image_size, self.image_size))
             text = txt
-
-        if self.dataset == 'hmc':
-            image_name = row['img'].split('/')[1]
-        else:
-            image_name = row['image']
 
         item = {
             'image_name': image_name,

@@ -9,7 +9,7 @@ import seaborn as sns
 from combiner import Combiner
 from textualInversion import TextualInversion
 
-CLIP_IMG_ENC_OUTPUT_DIM_BEFORE_PROJ = 1024
+CLIP_IMG_ENC_OUTPUT_DIM_BEFORE_PROJ = 768
 
 class LinearProjection(nn.Module):
     def __init__(self, input_dim, output_dim, num_layers, drop_probs):
