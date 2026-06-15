@@ -68,15 +68,17 @@ def get_arg_parser():
     parser.add_argument('--print_model', default=False, type=str2bool)
     parser.add_argument('--fast_process', default=False, type=str2bool)
 
-    parser.add_argument('--pos_weight', type=float, default=1.0, help="Rasio n_negative/n_positive")
+    parser.add_argument('--pos_weight', type=float, default=1.0, help="Ratio n_negative/n_positive")
+
+    parser.add_argument('--clip_model', default='ViT-L/14', choices=['ViT-L/14', 'm-CLIP'],
+                        help='CLIP backbone: ViT-L/14 (original) or m-CLIP (multilingual, ID-friendly).')
 
     parser.add_argument('--use_smote', default=False, action='store_true', help='Apply SMOTE to balance training data')
     parser.add_argument('--smote_strategy', default='auto', type=str,
-                        choices=['auto', 'adasyn', 'minority', 'all'],
+                        choices=['auto', 'adasyn', 'sampling'],
                         help='SMOTE resampling strategy')
 
     return parser
-
 
 def main(args):
     run_name = f'{generate_name(args)}-{random.randint(0, 1000000000)}'

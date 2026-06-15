@@ -11,7 +11,7 @@ os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 class MemesDataset(Dataset):
     def __init__(self, root_folder, dataset, split='train', image_size=224, fast=True,
-                 use_smote=False, smote_strategy='auto'):
+                 use_smote=False, smote_strategy='auto', clip_model_name='ViT-L/14'):
         super(MemesDataset, self).__init__()
         self.root_folder = root_folder
         self.dataset = dataset
@@ -21,8 +21,9 @@ class MemesDataset(Dataset):
         self.fast = fast
         self.use_smote = use_smote
         self.smote_strategy = smote_strategy
-
+        self.clip_model_name = clip_model_name
         self.info_file = os.path.join(root_folder, dataset, f'labels/{dataset}_info.csv')
+        
         try:
             self.df = pd.read_csv(self.info_file, encoding='utf-8')
         except UnicodeDecodeError:
@@ -33,7 +34,18 @@ class MemesDataset(Dataset):
 
         if self.fast:
             # Load embeddings first — SMOTE needs them as features
-            self.embds = torch.load(f'{self.root_folder}/{self.dataset}/clip_embds/{split}_no-proj_output.pt')
+            emb_suffix = "_mclip" if self.clip_model_name == "m-CLIP" else ""
+            emb_filename = f"{split}_no-proj_output{emb_suffix}.pt"
+            emb_path = f"{self.root_folder}/{self.dataset}/clip_embds/{emb_filename}"
+
+            if not os.path.exists(emb_path):
+                raise FileNotFoundError(
+                    f"Embedding file not found: {emb_path}\n"
+                    f"Run createClipEmbedding.py --dataset {self.dataset} --clip_model {self.clip_model_name} first."
+                )
+
+            print(f"[dataset] Loading embeddings: {emb_filename}")
+            self.embds = torch.load(emb_path)
             self.embdsDF = pd.DataFrame(self.embds)
 
             assert len(self.embds) == len(self.df), (
@@ -41,6 +53,7 @@ class MemesDataset(Dataset):
             )
 
             # Apply SMOTE in CLIP embedding space (only on training split)
+            self.original_len = len(self.df)
             if self.use_smote and self.split == 'train':
                 self._apply_smote_on_embeddings()
 
@@ -98,9 +111,10 @@ class MemesDataset(Dataset):
             return
 
         # 3. Split the resampled features back into image and text embeddings, then append to dataset
-        synth_features = features_resampled[n_samples:]          # (n_synthetic, 1536)
-        synth_img_embs = synth_features[:, :768]                 # (n_synthetic, 768)
-        synth_txt_embs = synth_features[:, 768:]                 # (n_synthetic, 768)
+        img_txt_dim = 1024 if self.clip_model_name == 'm-CLIP' else 768
+        synth_features = features_resampled[n_samples:]
+        synth_img_embs = synth_features[:, :img_txt_dim]
+        synth_txt_embs = synth_features[:, img_txt_dim:]
         synth_labels   = labels_resampled[n_samples:]
 
         # 4. Add synthetic entries to self.embds and self.df
@@ -144,21 +158,24 @@ class MemesDataset(Dataset):
         return len(self.df)
 
     def __getitem__(self, idx):
+        # Take dataframe row with index
         row = self.df.iloc[idx]
         label = row['label']
 
+        # Metadata image name handle for original and SMOTE data
         if row['id'] >= 0:  # Original data have positive ID
             if self.dataset == 'hmc':
                 image_name = row['img'].split('/')[1]
             else:
                 image_name = row['image']
         else:
-            # Synthetics data SMOTE have negative ID
-            image_name = f"smote_synthetic_{abs(row['id'])}"
+            image_name = f"smote_synthetic_{abs(row['id'])}" # Synthetics data SMOTE have negative ID
 
         txt = 'null' if row['text'] == 'nothing' else row['text']
 
+        # Take embeddings if fast, otherwise load raw image and text inputs
         if self.fast:
+            # Search for the embedding corresponding to the current row's idx_meme
             matches = self.embdsDF.loc[self.embdsDF['idx_meme'] == row['id']].index
             if len(matches) == 0:
                 # Fallback make sure models don't break if idx_meme not found in embdsDF
@@ -195,8 +212,27 @@ class MemesDataset(Dataset):
 class MemesCollator(object):
     def __init__(self, args):
         self.args = args
+        self.clip_model_name = getattr(args, 'clip_model', 'ViT-L/14')
+
         if not args.fast_process:
             _, self.clip_preprocess = clip.load("ViT-L/14", device="cuda", jit=False)
+
+            # For m-CLIP slow path: load HF tokenizer for text encoding
+            # Image preprocessing stays identical — same ViT-L/14 image encoder
+            if self.clip_model_name == 'm-CLIP':
+                try:
+                    from transformers import AutoTokenizer
+                    self.mclip_tokenizer = AutoTokenizer.from_pretrained(
+                        "M-CLIP/XLM-Roberta-Large-Vit-L-14"
+                    )
+                    print("[collator] m-CLIP tokenizer loaded for slow-path text encoding.")
+                except ImportError:
+                    raise ImportError(
+                        "transformers is required for --clip_model m-CLIP slow path.\n"
+                        "Install with: pip install transformers"
+                    )
+            else:
+                self.mclip_tokenizer = None
 
     def __call__(self, batch):
         labels = torch.LongTensor([item['label'] for item in batch])
@@ -246,10 +282,9 @@ class MemesCollator(object):
 
         return batch_new
 
-
 def load_dataset(args, split):
-    dataset = MemesDataset(root_folder=f'./resources/datasets', dataset=args.dataset, split=split,
-                           image_size=args.image_size, fast=args.fast_process,
-                           use_smote=getattr(args, 'use_smote', False), smote_strategy=getattr(args, 'smote_strategy', 'auto'))
+    dataset = MemesDataset(root_folder=f'./resources/datasets', dataset=args.dataset, split=split, image_size=args.image_size, 
+                           fast=args.fast_process, use_smote=getattr(args, 'use_smote', False), 
+                           smote_strategy=getattr(args, 'smote_strategy', 'auto'), clip_model_name=getattr(args, 'clip_model', 'ViT-L/14'))
 
     return dataset

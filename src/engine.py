@@ -8,8 +8,23 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from combiner import Combiner
 from textualInversion import TextualInversion
+from multilingual_clip import pt_multilingual_clip
+from transformers import AutoTokenizer
 
 CLIP_IMG_ENC_OUTPUT_DIM_BEFORE_PROJ = 768
+
+def _load_mclip(device: str):
+    MODEL_NAME = "M-CLIP/XLM-Roberta-Large-Vit-L-14"
+    
+    # Image encoder (same as CLIP ViT-L/14)
+    clip_model, _ = clip.load("ViT-L/14", device=device, jit=False)
+
+    # Multilingual text encoder
+    mclip_text_model = pt_multilingual_clip.MultilingualCLIP.from_pretrained(MODEL_NAME)
+    mclip_text_model = mclip_text_model.to(device).eval()
+    mclip_tokenizer  = AutoTokenizer.from_pretrained(MODEL_NAME)
+
+    return clip_model, mclip_text_model, mclip_tokenizer
 
 class LinearProjection(nn.Module):
     def __init__(self, input_dim, output_dim, num_layers, drop_probs):
@@ -30,9 +45,7 @@ class LinearProjection(nn.Module):
     def forward(self, x):
         return self.proj(x)
 
-
 class HateClassifier(pl.LightningModule):
-
     def __init__(self, args):
         super().__init__()
 
@@ -72,23 +85,41 @@ class HateClassifier(pl.LightningModule):
         self.auroc = torchmetrics.AUROC(task='binary')
 
         self.pretrained_weights_path = f'./resources/pretrained_weights/{self.dataset}'
+        self.clip_model_name = getattr(args, 'clip_model', 'ViT-L/14')
 
-        # load pre-trained CLIP model
-        self.clip_model, _ = clip.load("ViT-L/14", device="cuda", jit=False)
+        # Load pre-trained CLIP model
+        if self.clip_model_name == 'm-CLIP':
+            self.clip_model, self.mclip_text_model, self.mclip_tokenizer = _load_mclip("cuda")
+            print("[engine] Using M-CLIP (XLM-Roberta-Large-ViT-L-14) backbone.")
+        else:
+            self.clip_model, _ = clip.load("ViT-L/14", device="cuda", jit=False)
+            self.mclip_text_model = None
+            self.mclip_tokenizer  = None
+            print("[engine] Using CLIP ViT-L/14 backbone.")
 
-        # remove CLIP image encoder projection (textual projection must be computed again without projection product)
+        # Remove CLIP image encoder projection (textual projection must be computed again without projection product)
         self.clip_model.visual.proj = None
 
-        # set CLIP model to float32 type
+        # Set CLIP model to float32 type
         self.clip_model.float()
 
-        # freeze CLIP weights
-        for _, p in self.clip_model.named_parameters():
-            p.requires_grad_(False)
+        # Freeze all CLIP weights
+        if self.mclip_text_model is not None:
+            for _, p in self.mclip_text_model.named_parameters():
+                p.requires_grad_(False)
 
-        self.image_map = LinearProjection(CLIP_IMG_ENC_OUTPUT_DIM_BEFORE_PROJ, self.map_dim,
+        if self.clip_model_name == 'm-CLIP':
+            image_input_dim = 1024
+            text_input_dim = 1024
+            print("[engine] m-CLIP mode: Using 1024 dimensions for both image and text.")
+        else:
+            image_input_dim = CLIP_IMG_ENC_OUTPUT_DIM_BEFORE_PROJ
+            text_input_dim = self.clip_model.token_embedding.embedding_dim
+            print("[engine] CLIP ViT-L/14 mode: Using 768 dimensions for image and text.")
+
+        self.image_map = LinearProjection(image_input_dim, self.map_dim,
                                           self.num_mapping_layers, args.drop_probs)
-        self.text_map = LinearProjection(self.clip_model.token_embedding.embedding_dim, self.map_dim,
+        self.text_map = LinearProjection(text_input_dim, self.map_dim,
                                          self.num_mapping_layers, args.drop_probs)
 
         if self.name in ['hate-clipper', 'adaptation']:
@@ -100,12 +131,12 @@ class HateClassifier(pl.LightningModule):
             if self.proj_map:
                 pre_output_input_dim = self.map_dim
             else:
-                pre_output_input_dim = self.clip_model.token_embedding.embedding_dim
+                pre_output_input_dim = text_input_dim
         elif self.name == 'image-only':
             if self.proj_map:
                 pre_output_input_dim = self.map_dim
             else:
-                pre_output_input_dim = CLIP_IMG_ENC_OUTPUT_DIM_BEFORE_PROJ
+                pre_output_input_dim = image_input_dim
 
         elif self.name == 'sum':
             # proj_map is used by default
@@ -148,18 +179,18 @@ class HateClassifier(pl.LightningModule):
             pre_output_input_dim = self.map_dim
 
         elif self.name == 'text-inv':
-            self.text_inv = TextualInversion(self.clip_model, CLIP_IMG_ENC_OUTPUT_DIM_BEFORE_PROJ, self.phi_inv_proj,
+            self.text_inv = TextualInversion(self.clip_model, image_input_dim, self.phi_inv_proj,
                                              self.text_inv_proj, self.post_inv_proj, args.drop_probs, self.phi_freeze,
                                              self.enh_text, self.map_dim, self.num_mapping_layers)
 
             pre_output_input_dim = self.text_inv.output_dim
 
         elif self.name == 'text-inv-fusion':
-            self.text_inv = TextualInversion(self.clip_model, CLIP_IMG_ENC_OUTPUT_DIM_BEFORE_PROJ, self.phi_inv_proj,
+            self.text_inv = TextualInversion(self.clip_model, image_input_dim, self.phi_inv_proj,
                                              self.text_inv_proj, self.post_inv_proj, args.drop_probs, self.phi_freeze,
                                              self.enh_text, self.map_dim, self.num_mapping_layers)
 
-            self.image_map = LinearProjection(CLIP_IMG_ENC_OUTPUT_DIM_BEFORE_PROJ, self.map_dim,
+            self.image_map = LinearProjection(image_input_dim, self.map_dim,
                                               self.num_mapping_layers, args.drop_probs)
 
             pre_output_input_dim = self.text_inv.output_dim
@@ -167,11 +198,11 @@ class HateClassifier(pl.LightningModule):
         elif self.name == 'text-inv-comb':
             self.comb = Combiner(self.convex_tensor, self.map_dim, self.comb_proj, self.comb_fusion)
 
-            self.text_inv = TextualInversion(self.clip_model, CLIP_IMG_ENC_OUTPUT_DIM_BEFORE_PROJ, self.phi_inv_proj,
+            self.text_inv = TextualInversion(self.clip_model, image_input_dim, self.phi_inv_proj,
                                              self.text_inv_proj, self.post_inv_proj, args.drop_probs, self.phi_freeze,
                                              self.enh_text, self.map_dim, self.num_mapping_layers)
 
-            self.image_map = LinearProjection(CLIP_IMG_ENC_OUTPUT_DIM_BEFORE_PROJ, self.map_dim,
+            self.image_map = LinearProjection(image_input_dim, self.map_dim,
                                               self.num_mapping_layers, args.drop_probs)
 
             if self.fusion == 'align':

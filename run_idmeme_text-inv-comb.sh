@@ -4,11 +4,11 @@ python src/main.py \
     --map_dim 768 \
     --fusion align \
     --num_pre_output_layers 3 \
-    --drop_probs 0.2 0.4 0.1 \
+    --drop_probs 0.4 0.5 0.3 \
     --gpus '0' \
     --batch_size 16 \
     --lr 0.000013 \
-    --max_epochs 20 \
+    --max_epochs 10 \
     --name 'text-inv-comb' \
     --pretrained_model '' \
     --reproduce f \
@@ -23,5 +23,6 @@ python src/main.py \
     --enh_text t \
     --phi_freeze f \
     --fast_process t \
+    --clip_model 'm-CLIP' \
     --use_smote \
     --smote_strategy 'auto'
