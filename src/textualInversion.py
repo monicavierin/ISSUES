@@ -2,8 +2,10 @@ import torch
 import torch.nn as nn
 from clip.model import CLIP
 
+# Expected token embedding dimension used by the CLIP backbone for the phi module.
 PHI_INPUT_DIM = 768
 
+# Textual inversion module that injects image-conditioned pseudo tokens into CLIP text encoding.
 class TextualInversion(nn.Module):
     def __init__(self, clip_model: CLIP, clip_img_enc_output_dim: int, phi_proj: bool, text_proj: bool, post_proj: bool,
                  drop_probs, phi_freeze: bool, enh_text: bool, post_dim=None, num_pre_proj_layers=1):
@@ -15,6 +17,7 @@ class TextualInversion(nn.Module):
         self.post_proj = post_proj
         self.enh_text = enh_text
 
+        # Ensure the selected CLIP tokenizer embedding size matches the pretrained phi network.
         assert self.clip_model.token_embedding.embedding_dim == PHI_INPUT_DIM, 'CLIP model selected is not compatible' \
                                                                                ' with the pre-trained phi network'
 
@@ -23,7 +26,7 @@ class TextualInversion(nn.Module):
         else:
             self.output_dim = self.clip_model.token_embedding.embedding_dim
 
-        # Define textual inversion network phi layers
+        # Build the phi network, which transforms image-derived features into a virtual token embedding.
         phi_layers = [nn.Linear(PHI_INPUT_DIM, 3072),
                       nn.GELU(),
                       nn.Dropout(p=0.5),
@@ -35,12 +38,12 @@ class TextualInversion(nn.Module):
         self.phi = nn.Sequential(*phi_layers)
 
         if phi_proj:
-            # Add linear projection after phi
+            # Optional projection head after phi for additional feature alignment.
             phi_map_layers = [nn.Linear(PHI_INPUT_DIM, PHI_INPUT_DIM),
                               nn.Dropout(p=drop_probs[0])]
             self.phi_map = nn.Sequential(*phi_map_layers)
 
-        # load pre-trained weights of phi
+        # Initialize phi weights from the pretrained checkpoint rather than random initialization.
         phi_dict = torch.load("./resources/pretrained_weights/phi/phi_imagenet_45.pt")["MLPCustom"]
         with torch.no_grad():
             self.phi[0].weight.copy_(phi_dict['layers.0.weight'])
@@ -51,10 +54,11 @@ class TextualInversion(nn.Module):
             self.phi[6].bias.copy_(phi_dict['layers.6.bias'])
 
         if phi_freeze:
+            # Freeze the phi backbone when the experiment wants to keep it fixed.
             for name, p in self.phi.named_parameters():
                 p.requires_grad_(False)
 
-        # Define linear projection after image encoder
+        # Project the image encoder output into the phi input space before inversion.
         in_dim = clip_img_enc_output_dim
         pre_inversion_layers = [nn.Linear(in_dim, PHI_INPUT_DIM),
                                 nn.Dropout(p=drop_probs[0])]
@@ -64,11 +68,12 @@ class TextualInversion(nn.Module):
         self.pre_inversion_map = nn.Sequential(*pre_inversion_layers)
 
         if post_proj:
-            # define linear projection after clip text encoder
+            # Optional post-processing projection after CLIP text encoding.
             post_inversion_layers = [nn.Linear(self.clip_model.token_embedding.embedding_dim, post_dim),
                                      nn.Dropout(p=drop_probs[0])]
             self.post_inversion_map = nn.Sequential(*post_inversion_layers)
 
+    # Replace the special token placeholder with the learned virtual token embedding produced by phi.
     def encode_with_vstar(self, clip_model: CLIP, text: torch.tensor, v_star: torch.tensor, num_vstar=1,
                           pooling=True, token_id=259, proj=True):
         x = clip_model.token_embedding(text).type(clip_model.dtype)
@@ -93,6 +98,7 @@ class TextualInversion(nn.Module):
         x = clip_model.ln_final(x).type(clip_model.dtype)
 
         if pooling:
+            # Pool the last token representation into a single feature vector for downstream fusion.
             if proj:
                 x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ clip_model.text_projection
             else:
@@ -102,12 +108,13 @@ class TextualInversion(nn.Module):
     def __call__(self, *args, **kwargs):
         return super().__call__(*args, **kwargs)
 
+    # Main forward path: image features -> phi token -> CLIP text encoding with virtual token injection.
     def forward(self, prompt, image_features):
-        # [STAGE] TextualInversion: setelah pre_inversion_map (gambar -> 768d)
+        # Project image features into the phi network input dimension.
         img_features = self.pre_inversion_map(image_features)
         # img_features = F.normalize(img_features, p=2, dim=1)
 
-        # [STAGE] TextualInversion: setelah phi (v_star)
+        # Generate the virtual token embedding from the projected image features.
         v_star = self.phi(img_features)
 
         if self.phi_proj:
@@ -116,7 +123,7 @@ class TextualInversion(nn.Module):
 
         text_input = prompt
 
-        # [STAGE] TextualInversion: setelah CLIP text encoder + v_star (embedding teks)
+        # Encode the prompt with the learned virtual token inserted into the CLIP text input.
         features = self.encode_with_vstar(self.clip_model, text_input, v_star, proj=self.text_proj).float()
         # features = F.normalize(features, p=2, dim=1)
 

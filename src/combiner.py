@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 
+# Fusion module that combines projected image and text features through learned branches.
 class Combiner(nn.Module):
     def __init__(self, convex_tensor: bool, input_dim: int, comb_proj: bool, comb_fusion: str):
         super(Combiner, self).__init__()
@@ -9,6 +10,8 @@ class Combiner(nn.Module):
         self.comb_fusion = comb_fusion
         self.convex_tensor = convex_tensor
 
+        # When convex_tensor is enabled, the shared branch outputs a tensor with the same feature size.
+        # Otherwise, it produces a scalar gate-like coefficient.
         if self.convex_tensor:
             branch_out_dim = self.map_dim
         else:
@@ -17,6 +20,7 @@ class Combiner(nn.Module):
         comb_in_dim = self.map_dim
         comb_concat_out_dim = comb_in_dim
 
+        # Optional projection blocks for image and text branches before fusion.
         if self.comb_proj:
             self.comb_image_proj = nn.Sequential(
                 nn.Linear(comb_in_dim, 2 * comb_in_dim),
@@ -32,6 +36,7 @@ class Combiner(nn.Module):
 
             comb_in_dim = 2 * comb_in_dim
 
+        # Decide fusion style: concatenation or element-wise alignment.
         if self.comb_fusion == 'concat':
             branch_in_dim = 2 * comb_in_dim
         elif self.comb_fusion == 'align':
@@ -39,6 +44,7 @@ class Combiner(nn.Module):
         else:
             ValueError()
 
+        # Shared branch produces a soft gate used to balance the contribution of image and text features.
         self.comb_shared_branch = nn.Sequential(
             nn.Linear(branch_in_dim, 2 * branch_in_dim),
             nn.ReLU(),
@@ -47,6 +53,7 @@ class Combiner(nn.Module):
             nn.Sigmoid()
         )
 
+        # Central branch creates the fused representation from the combined feature tensor.
         self.comb_concat_branch = nn.Sequential(
             nn.Linear(branch_in_dim, 2 * branch_in_dim),
             nn.ReLU(),
@@ -57,6 +64,7 @@ class Combiner(nn.Module):
     def __call__(self, *args, **kwargs):
         return super().__call__(*args, **kwargs)
 
+    # Combine class-specific image and text embeddings into a unified multimodal representation.
     def forward(self, img_projection, post_features):
         if self.comb_proj:
             proj_img_fea = self.comb_image_proj(img_projection)
@@ -65,6 +73,7 @@ class Combiner(nn.Module):
             proj_img_fea = img_projection
             proj_txt_fea = post_features
 
+        # Fuse the two projected modalities either by concatenation or alignment.
         if self.comb_fusion == 'concat':
             comb_features = torch.cat([proj_img_fea, proj_txt_fea], dim=1)
         elif self.comb_fusion == 'align':
@@ -72,6 +81,7 @@ class Combiner(nn.Module):
         else:
             raise ValueError()
 
+        # The shared branch balances the final contribution of both inputs, while the central branch forms the fused representation.
         side_branch = self.comb_shared_branch(comb_features)
         central_branch = self.comb_concat_branch(comb_features)
 

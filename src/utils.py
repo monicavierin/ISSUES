@@ -1,5 +1,6 @@
 import argparse
 
+# Convert CLI string booleans such as 'true'/'false' to Python bool values.
 def str2bool(v):
     """
     src: https://stackoverflow.com/questions/15008758/parsing-boolean-values-with-argparse
@@ -16,9 +17,11 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
 
+# Build a compact experiment name that reflects the selected architecture and training settings.
 def generate_name(args):
     terms = [args.name, args.dataset]
 
+    # Include pretraining/finetuning behavior when combiner-based architectures are used.
     if args.name in ['combiner', 'text-inv-comb']:
         if getattr(args, 'pretrained_proj_weights'):
             if getattr(args, 'freeze_proj_layers'):
@@ -26,6 +29,7 @@ def generate_name(args):
             else:
                 terms.append('two-stage-finetune')
 
+    # Record projection-map configuration for sum/combiner variants.
     if args.name in ['sum', 'combiner']:
         terms.append(f'{args.num_mapping_layers}-{args.map_dim}-proj-map')
 
@@ -33,6 +37,7 @@ def generate_name(args):
         if getattr(args, 'proj_map'):
             terms.append(f'{args.num_mapping_layers}-{args.map_dim}-proj-map')
 
+    # Add textual inversion-related options to the experiment name for traceability.
     if args.name in ['text-inv', 'text-inv-fusion', 'text-inv-comb']:
         if getattr(args, 'text_inv_proj'):
             terms.append('clip-text-proj')
@@ -47,9 +52,11 @@ def generate_name(args):
         else:
             terms.append('phi-finetune')
 
+    # Record the fusion strategy for relevant model variants.
     if args.name in ['adaptation', 'hate-clipper', 'text-inv-fusion']:
         terms.append(args.fusion)
 
+    # Add combiner-specific settings to the generated experiment identifier.
     if args.name in ['combiner', 'text-inv-comb']:
         if getattr(args, 'comb_proj'):
             terms.append('comb-proj')
@@ -57,6 +64,7 @@ def generate_name(args):
         if getattr(args, 'convex_tensor'):
             terms.append('convex_tensor')
 
+    # Append the classifier head depth and fast-processing mode.
     terms.append(f'{args.num_pre_output_layers}-MLP')
 
     if getattr(args, 'fast_process'):

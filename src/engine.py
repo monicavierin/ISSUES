@@ -11,8 +11,10 @@ from textualInversion import TextualInversion
 from multilingual_clip import pt_multilingual_clip
 from transformers import AutoTokenizer
 
+# Standard output dimension produced by the CLIP image encoder used in this project.
 CLIP_IMG_ENC_OUTPUT_DIM = 768
 
+# Load the multilingual CLIP backbone for the m-CLIP configuration.
 def _load_mclip(device: str):
     MODEL_NAME = "M-CLIP/XLM-Roberta-Large-Vit-L-14"
     
@@ -26,6 +28,7 @@ def _load_mclip(device: str):
 
     return clip_model, mclip_text_model, mclip_tokenizer
 
+# Lightweight trainable projection block applied to image/text embeddings.
 class LinearProjection(nn.Module):
     def __init__(self, input_dim, output_dim, num_layers, drop_probs):
         super(LinearProjection, self).__init__()
@@ -45,6 +48,7 @@ class LinearProjection(nn.Module):
     def forward(self, x):
         return self.proj(x)
 
+# Main Lightning classifier for hateful memes detection using CLIP-based multimodal features.
 class HateClassifier(pl.LightningModule):
     def __init__(self, args):
         super().__init__()
@@ -77,6 +81,7 @@ class HateClassifier(pl.LightningModule):
         self.phi_inv_proj = args.phi_inv_proj
         self.post_inv_proj = args.post_inv_proj
 
+        # Metrics used for training, validation, and test evaluation.
         self.test_confmat = torchmetrics.ConfusionMatrix(task='binary', num_classes=2)
         self.confmat = torchmetrics.ConfusionMatrix(task='binary', num_classes=2)
         self.acc = torchmetrics.Accuracy(task='binary')
@@ -88,7 +93,7 @@ class HateClassifier(pl.LightningModule):
         self.pretrained_weights_path = f'./resources/pretrained_weights/{self.dataset}'
         self.clip_model_name = getattr(args, 'clip_model', 'ViT-L/14')
 
-        # Load pre-trained CLIP model
+        # Load the selected CLIP backbone. The default route uses ViT-L/14, while m-CLIP switches to a multilingual text encoder.
         if self.clip_model_name == 'm-CLIP':
             self.clip_model, self.mclip_text_model, self.mclip_tokenizer = _load_mclip("cuda")
             print("[engine] Using M-CLIP (XLM-Roberta-Large-ViT-L-14) backbone.")
@@ -98,13 +103,13 @@ class HateClassifier(pl.LightningModule):
             self.mclip_tokenizer  = None
             print("[engine] Using CLIP ViT-L/14 backbone.")
 
-        # Remove CLIP image encoder projection (textual projection must be computed again without projection product)
+        # Disable CLIP's image projection layer so the model can compute its own projection behavior in the training pipeline.
         self.clip_model.visual.proj = None
 
         # Set CLIP model to float32 type
         self.clip_model.float()
 
-        # Freeze all CLIP weights
+        # Freeze multilingual text encoder weights to preserve the pretrained backbone during adaptation.
         if self.mclip_text_model is not None:
             for _, p in self.mclip_text_model.named_parameters():
                 p.requires_grad_(False)
@@ -118,6 +123,7 @@ class HateClassifier(pl.LightningModule):
             text_input_dim = self.clip_model.token_embedding.embedding_dim
             print("[engine] CLIP ViT-L/14 mode: Using 768 dimensions for image and text.")
 
+        # Create separate projection heads for image and text representations.
         self.image_map = LinearProjection(image_input_dim, self.map_dim,
                                           self.num_mapping_layers, args.drop_probs)
         self.text_map = LinearProjection(text_input_dim, self.map_dim,
@@ -144,7 +150,7 @@ class HateClassifier(pl.LightningModule):
             pre_output_input_dim = self.map_dim
 
         elif self.name == 'combiner':
-            # proj_map is used by default
+            # proj_map is used by default, the combiner fuses both modalities with a learned strategy.
             self.comb = Combiner(self.convex_tensor, self.map_dim, self.comb_proj, self.comb_fusion)
 
             if self.pretrained_proj:
@@ -180,6 +186,7 @@ class HateClassifier(pl.LightningModule):
             pre_output_input_dim = self.map_dim
 
         elif self.name == 'text-inv':
+            # Build a textual inversion module to inject image-conditioned textual information.
             self.text_inv = TextualInversion(self.clip_model, image_input_dim, self.phi_inv_proj,
                                              self.text_inv_proj, self.post_inv_proj, args.drop_probs, self.phi_freeze,
                                              self.enh_text, self.map_dim, self.num_mapping_layers)
@@ -264,10 +271,11 @@ class HateClassifier(pl.LightningModule):
             pre_output_layers.extend(
                 [nn.Linear(self.map_dim, self.map_dim), nn.ReLU(), nn.Dropout(p=args.drop_probs[2])])
 
+        # Final classifier head after the modality fusion stage.
         self.pre_output = nn.Sequential(*pre_output_layers)
         self.output = nn.Linear(output_input_dim, 1)
 
-        # Add weight loss to give FP penalty
+        # Use a class-weighted BCE loss to penalize false positives more strongly when requested.
         if args.pos_weight and args.pos_weight != 1.0:
             pos_weight = torch.tensor([args.pos_weight])
             self.cross_entropy_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction='mean')
@@ -276,9 +284,11 @@ class HateClassifier(pl.LightningModule):
 
         self.test_outputs = []
 
+    # Forward pass is handled by common_step so the batch can be processed consistently across train/val/test.
     def forward(self, batch):
         pass
 
+    # Extract CLIP image and text embeddings without using the CLIP text projection block.
     def compute_CLIP_features_without_proj(self, clip_model, img_input, text_input):
         # CLIP image encoder projection is disabled in the init method
         image_features = clip_model.visual(img_input.type(clip_model.dtype))
@@ -294,6 +304,7 @@ class HateClassifier(pl.LightningModule):
 
         return image_features, text_features
 
+    # Shared workflow for train/val/test that computes logits, probabilities, and metrics from one batch.
     def common_step(self, batch):
         if self.fast_process:
             image_features = batch['images']
@@ -303,7 +314,7 @@ class HateClassifier(pl.LightningModule):
                                                                                     batch['pixel_values'],
                                                                                     batch['texts'])
 
-        # [STAGE] Engine: setelah CLIP image/text encoder (output A / fitur teks)
+        # Select the text prompt variant: enhanced prompt or simple prompt.
         if self.enh_text:
             prompt = batch['enhanced_texts']
         else:
@@ -311,6 +322,8 @@ class HateClassifier(pl.LightningModule):
 
         output = {}
 
+        # Route the extracted features through the selected model branch: alignment, concat, sum, combiner, or textual inversion.
+        
         if self.name in ['hate-clipper', 'adaptation']:
             image_features = self.image_map(image_features)
             # image_features = F.normalize(image_features, p=2, dim=1)  # [batch_size, d]
@@ -368,17 +381,14 @@ class HateClassifier(pl.LightningModule):
 
         elif self.name == 'text-inv-comb':
             txt_features = self.text_inv(prompt, image_features)
-
-            # [STAGE] Engine: setelah Linear image projection (ke Combiner)
             img_projection = self.image_map(image_features)
 
-            # [STAGE] Engine: setelah Combiner (fitur gabungan)
             features = self.comb(img_projection, txt_features)
 
         else:
             raise ValueError()
 
-        # [STAGE] Engine: setelah MLP pre_output + kepala klasifikasi
+        # Apply the pre-output MLP and final binary classifier.
         features_pre_output = self.pre_output(features)
         logits = self.output(features_pre_output).squeeze(dim=1)  # [batch_size, 1]
         preds_proxy = torch.sigmoid(logits)
@@ -400,6 +410,7 @@ class HateClassifier(pl.LightningModule):
 
         return output
 
+    # One training step logs all main metrics for experiment tracking.
     def training_step(self, batch, batch_idx):
         output = self.common_step(batch)
 
@@ -415,6 +426,7 @@ class HateClassifier(pl.LightningModule):
 
         return total_loss
 
+    # Validation step reuses common_step and stores the validation metrics.
     def validation_step(self, batch, batch_idx):
         output = self.common_step(batch)
 
@@ -430,6 +442,7 @@ class HateClassifier(pl.LightningModule):
 
         return total_loss
 
+    # Test step logs split-specific metrics and stores test predictions for W&B visualization.
     def test_step(self, batch, batch_idx, dataloader_idx):
         if self.dataset == 'hmc':
             prefix_map = {
@@ -449,7 +462,7 @@ class HateClassifier(pl.LightningModule):
         prefix = prefix_map[dataloader_idx]
         output = self.common_step(batch)
 
-        # Save prediction table to wandb
+        # Save test predictions only from the final split to avoid duplicate logging.
         if dataloader_idx == len(prefix_map) - 1:
             probs = torch.sigmoid(output['logits'])
             preds = (probs > 0.5).long()
@@ -490,18 +503,19 @@ class HateClassifier(pl.LightningModule):
 
         return optimizer
     
+    # Generate confusion matrix, ROC curve, and evaluation tables at the end of the test phase.
     def on_test_epoch_end(self):
         if not self.test_outputs:
             return
         
-        # Value for confusion matrix and ROC curve
+        # Prepare arrays for W&B visualizations of the final test results.
         y_true = [row["ground_truth"] for row in self.test_outputs]
         y_pred = [row["prediction"] for row in self.test_outputs]
         y_prob = [row["probability"] for row in self.test_outputs]
         y_prob_2d = [[1 - prob, prob] for prob in y_prob]  # Convert to 2D array for AUROC plot
         class_names = ["non-hate", "hate"]
 
-        # Confusion matrix heatmap for test set      
+        # Log a heatmap of the confusion matrix for easy qualitative inspection.
         cm = self.test_confmat.compute().cpu().numpy()
         fig, ax = plt.subplots(figsize=(4, 4))
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
@@ -512,7 +526,7 @@ class HateClassifier(pl.LightningModule):
         wandb.log({"test_confmat_heatmap": wandb.Image(fig)})
         plt.close(fig)  
 
-        # ROC curve for test set
+        # Log the ROC curve to inspect class-separation quality.
         wandb.log({
             "test_roc_curve": wandb.plot.roc_curve(
                 y_true=y_true, 
@@ -521,7 +535,7 @@ class HateClassifier(pl.LightningModule):
             )
         })
 
-        # Log evaluation metrics in a W&B table
+        # Summarize train, validation, and test metrics in a W&B table.
         m = wandb.run.summary
 
         def get_val(key):
@@ -560,7 +574,7 @@ class HateClassifier(pl.LightningModule):
 
         wandb.log({"evaluation_metrics": metrics_table})
 
-        # Prediction table for test set
+        # Log a sample of predictions for manual inspection inside W&B.
         pred_table = wandb.Table(columns=["image_name", "ground_truth", "prediction", "probability"])
 
         for row in self.test_outputs[:50]:
@@ -573,12 +587,13 @@ class HateClassifier(pl.LightningModule):
 
         wandb.log({"test_predictions": pred_table})
 
-        # Reset metrics and test outputs for next test run
+        # Reset stored metric states so the next test run starts with a clean slate.
         self.test_confmat.reset()
         self.confmat.reset()
         self.auroc.reset()
         self.test_outputs.clear()
 
+# Factory function used by the main script to instantiate the classifier.
 def create_model(args):
     model = HateClassifier(args=args)
     return model

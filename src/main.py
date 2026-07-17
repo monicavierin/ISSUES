@@ -9,9 +9,10 @@ from datasets import MemesCollator, load_dataset
 from engine import create_model, HateClassifier
 from utils import str2bool, generate_name
 
-# Activate tensor cores
+# Enable tensor core-friendly float32 matmul precision for faster training on supported GPUs.
 torch.set_float32_matmul_precision('medium')
 
+# Build the command-line interface for configuring training/evaluation runs.
 def get_arg_parser():
     parser = argparse.ArgumentParser(description='Training and evaluation script for hateful memes classification')
 
@@ -71,7 +72,7 @@ def get_arg_parser():
     parser.add_argument('--pos_weight', type=float, default=1.0, help="Ratio n_negative/n_positive")
 
     parser.add_argument('--clip_model', default='ViT-L/14', choices=['ViT-L/14', 'm-CLIP'],
-                        help='CLIP backbone: ViT-L/14 (original) or m-CLIP (multilingual, ID-friendly).')
+                        help='CLIP backbone: ViT-L/14 (original) or m-CLIP (multilingual).')
 
     parser.add_argument('--use_smote', default=False, action='store_true', help='Apply SMOTE to balance training data')
     parser.add_argument('--smote_strategy', default='auto', type=str,
@@ -80,12 +81,15 @@ def get_arg_parser():
 
     return parser
 
+# Execute the full training and evaluation workflow for a selected dataset and model configuration.
 def main(args):
+    # Generate a unique experiment name to keep logs and checkpoints organized.
     run_name = f'{generate_name(args)}-{random.randint(0, 1000000000)}'
 
+    # Ensure reproducibility across runs.
     seed_everything(42, workers=True)
 
-    # load dataset
+    # Load dataset splits based on the selected benchmark.
     if args.dataset == 'hmc':
         dataset_train = load_dataset(args=args, split='train')
         dataset_val = load_dataset(args=args, split='dev_seen')
@@ -101,6 +105,7 @@ def main(args):
     else:
         raise ValueError()
 
+    # Print dataset sizes for quick sanity checking.
     print("Number of training examples:", len(dataset_train))
     print("Number of validation examples:", len(dataset_val))
     print("Number of test examples:", len(dataset_test))
@@ -108,7 +113,7 @@ def main(args):
         print("Number of validation examples (unseen):", len(dataset_val_unseen))
         print("Number of test examples (unseen):", len(dataset_test_unseen))
 
-    # data loader
+    # Create data loaders using a custom collator for multimodal meme batches.
     # num_cpus = 0 if args.fast_process else min(args.batch_size, 24)
     num_cpus = 0 if args.fast_process else 4
 
@@ -126,16 +131,16 @@ def main(args):
         dataloader_test_unseen = DataLoader(dataset_test_unseen, batch_size=args.batch_size,
                                             collate_fn=collator, num_workers=num_cpus)
 
+    # Reuse a pretrained checkpoint when reproduction mode is enabled, otherwise build the model from scratch.
     if args.reproduce:
         assert args.pretrained_model.startswith(f'{args.dataset}'), 'The pretrained model and the dataset selected' \
                                                                    ' are not compatible'
-        # load pretrained model
         model = HateClassifier.load_from_checkpoint(f'resources/pretrained_models/{args.pretrained_model}', args=args,
                                                     map_location=None)
     else:
-        # create model
         model = create_model(args)
 
+    # Optionally print the full model definition and exit early.
     if args.print_model:
         print(model)
 
@@ -145,24 +150,28 @@ def main(args):
         #     print('{}: {}'.format(name,p.requires_grad))
         return
 
+    # Start experiment tracking with Weights & Biases.
     project = "hateful-memes"
-
     wandb_logger = WandbLogger(project=project, name=run_name, config=args)
 
+    # Log trainable parameter counts for experiment transparency.
     num_params = {f'param_{n}': p.numel() for n, p in model.named_parameters() if p.requires_grad}
     wandb_logger.experiment.config.update(num_params)
 
+    # Save the best checkpoint based on validation AUROC.
     monitor = "val/auroc"
     checkpoint_callback = ModelCheckpoint(dirpath='checkpoints', filename=run_name+'-{epoch:02d}',
                                           monitor=monitor, mode='max', verbose=True, save_weights_only=True,
                                           save_top_k=1, save_last=False)
 
+    # Configure the Lightning trainer for distributed GPU training and checkpoint monitoring.
     trainer = Trainer(accelerator='gpu', devices=args.gpus, max_epochs=args.max_epochs, max_steps=args.max_steps,
                       gradient_clip_val=args.gradient_clip_val, logger=wandb_logger,
                       log_every_n_steps=args.log_every_n_steps, val_check_interval=args.val_check_interval,
                       callbacks=[checkpoint_callback], limit_train_batches=args.limit_train_batches,
                       limit_val_batches=args.limit_val_batches, deterministic=False, precision="16")
 
+    # Train the model and evaluate it on the best checkpoint when not in reproduction mode.
     if not args.reproduce:
         trainer.fit(model, train_dataloaders=dataloader_train, val_dataloaders=dataloader_val)
 
@@ -189,10 +198,14 @@ def main(args):
             raise ValueError()
 
 if __name__ == '__main__':
+    # Parse configuration arguments from the command line.
     pars = get_arg_parser()
     arguments = pars.parse_args()
+
+    # Convert the GPU argument string into a list of integer device IDs.
     arguments.gpus = [int(id_) for id_ in arguments.gpus.split()]
     for i in arguments.gpus:
         print('current device: {}'.format(torch.cuda.get_device_properties(i)))
 
+    # Run the main script entry point.
     main(arguments)
