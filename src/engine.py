@@ -11,7 +11,7 @@ from textualInversion import TextualInversion
 from multilingual_clip import pt_multilingual_clip
 from transformers import AutoTokenizer
 
-CLIP_IMG_ENC_OUTPUT_DIM_BEFORE_PROJ = 768
+CLIP_IMG_ENC_OUTPUT_DIM = 768
 
 def _load_mclip(device: str):
     MODEL_NAME = "M-CLIP/XLM-Roberta-Large-Vit-L-14"
@@ -77,6 +77,7 @@ class HateClassifier(pl.LightningModule):
         self.phi_inv_proj = args.phi_inv_proj
         self.post_inv_proj = args.post_inv_proj
 
+        self.test_confmat = torchmetrics.ConfusionMatrix(task='binary', num_classes=2)
         self.confmat = torchmetrics.ConfusionMatrix(task='binary', num_classes=2)
         self.acc = torchmetrics.Accuracy(task='binary')
         self.precmet = torchmetrics.Precision(task='binary')
@@ -113,7 +114,7 @@ class HateClassifier(pl.LightningModule):
             text_input_dim = 1024
             print("[engine] m-CLIP mode: Using 1024 dimensions for both image and text.")
         else:
-            image_input_dim = CLIP_IMG_ENC_OUTPUT_DIM_BEFORE_PROJ
+            image_input_dim = CLIP_IMG_ENC_OUTPUT_DIM
             text_input_dim = self.clip_model.token_embedding.embedding_dim
             print("[engine] CLIP ViT-L/14 mode: Using 768 dimensions for image and text.")
 
@@ -384,8 +385,10 @@ class HateClassifier(pl.LightningModule):
 
         preds = (preds_proxy >= 0.5).long() # Threshold value changes to increase precision
 
-        output['loss'] = self.cross_entropy_loss(logits, batch['labels'].float())
-        output['confmat'] = self.confmat(preds, batch['labels'])
+        if self.trainer.testing:
+            output['confmat'] = self.test_confmat(preds, batch['labels'])
+        else:
+            output['confmat'] = self.confmat(preds, batch['labels'])
         output['accuracy'] = self.acc(preds, batch['labels'])
         output['precision'] = self.precmet(preds, batch['labels'])
         output['recall'] = self.recall(preds, batch['labels'])
@@ -393,6 +396,7 @@ class HateClassifier(pl.LightningModule):
         output['auroc'] = self.auroc(preds_proxy, batch['labels'])
         output['logits'] = logits
         output['probs'] = preds_proxy.detach()
+        output['loss'] = self.cross_entropy_loss(logits, batch['labels'].float())
 
         return output
 
@@ -498,7 +502,7 @@ class HateClassifier(pl.LightningModule):
         class_names = ["non-hate", "hate"]
 
         # Confusion matrix heatmap for test set      
-        cm = self.confmat.compute().cpu().numpy()
+        cm = self.test_confmat.compute().cpu().numpy()
         fig, ax = plt.subplots(figsize=(4, 4))
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
                     xticklabels=class_names, yticklabels=class_names, ax=ax)
@@ -570,6 +574,7 @@ class HateClassifier(pl.LightningModule):
         wandb.log({"test_predictions": pred_table})
 
         # Reset metrics and test outputs for next test run
+        self.test_confmat.reset()
         self.confmat.reset()
         self.auroc.reset()
         self.test_outputs.clear()
